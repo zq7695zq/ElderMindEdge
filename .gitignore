@@ -1,0 +1,11 @@
+/pretrained.zip
+/test107voice.mp4
+/yolo11x-pose.pt
+/__pycache__
+/event_clips
+/llm_results
+/configs/stream_config.yaml
+/pretrained
+/utils/__pycache__
+/model/__pycache__
+/utils/llm_utils/__pycache__
