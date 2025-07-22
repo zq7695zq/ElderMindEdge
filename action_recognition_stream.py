@@ -23,6 +23,9 @@ from utils.utils import (
     import_class, load_config, get_default_config, create_metadata_file, load_action_labels
 )
 from utils.llm_utils import LLMInferenceManager
+from utils.inference_scheduler import (
+    InferenceScheduler, BatchInferenceProcessor, SamplingStrategy, create_inference_scheduler
+)
 
 # 设置日志记录
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -135,6 +138,22 @@ class ActionRecognitionStream:
         
         window_size = self.config['stream_config'].get('window_size', 64)
         self.preprocessor = SkateFormerPreprocessor(window_size=window_size, num_people=self.num_people)
+
+        # 初始化推理调度器
+        scheduler_config = self.config['stream_config'].get('inference_scheduler', {})
+        self.use_inference_scheduler = scheduler_config.get('enabled', False)
+
+        if self.use_inference_scheduler:
+            self.inference_scheduler = create_inference_scheduler(self.config['stream_config'])
+            self.batch_processor = BatchInferenceProcessor(self.preprocessor, self.device)
+            logger.info(f"推理调度器已启用: 策略={self.inference_scheduler.strategy.value}, "
+                       f"窗口大小={self.inference_scheduler.window_size}, "
+                       f"步幅={self.inference_scheduler.stride}, "
+                       f"批量大小={self.inference_scheduler.batch_size}")
+        else:
+            self.inference_scheduler = None
+            self.batch_processor = None
+            logger.info("使用传统滑动窗口推理模式")
         
         self.priority_boost_factors = self.config['stream_config'].get('priority_boost_factors', {'critical': 5.0, 'high': 3.0, 'medium': 2.0, 'low': 1.5})
         self.base_boost_factor = self.config['stream_config']['target_actions'].get('boost_factor', 3.0)
@@ -518,37 +537,69 @@ class ActionRecognitionStream:
     def _inference_worker(self):
         last_fps_time, fps_counter, last_inference_time = time.time(), 0, 0
         logger.info("推理工作线程已启动")
+
         while not self.stop_event.is_set():
             try:
                 skeleton_packet = self.skeleton_queue.get(timeout=1.0)
                 if skeleton_packet is None: break # 收到退出信号
                 if time.time() < self.suppress_inference_until_ts: continue
 
-                preprocessed_data = self.preprocessor.add_frame(skeleton_packet.skeleton)
                 current_time = time.time()
-                if preprocessed_data is not None and (current_time - last_inference_time) >= self.frame_interval:
-                    inference_result = self._run_inference_async(
-                        preprocessed_data, skeleton_packet.frame, 
-                        skeleton_packet.frame_id, skeleton_packet.timestamp
-                    )
-                    if inference_result:
-                        try: self.inference_queue.put_nowait(inference_result)
-                        except queue.Full:
-                            try:
-                                self.inference_queue.get_nowait()
-                                self.inference_queue.put_nowait(inference_result)
-                            except queue.Empty: pass
-                    last_inference_time = current_time
 
-                fps_counter += 1
+                if self.use_inference_scheduler:
+                    # 使用新的推理调度器
+                    batch = self.inference_scheduler.feed_frame(
+                        skeleton_packet.skeleton,
+                        skeleton_packet.frame_id,
+                        skeleton_packet.timestamp
+                    )
+
+                    if batch is not None and (current_time - last_inference_time) >= self.frame_interval:
+                        # 处理批量推理，返回单个最佳结果
+                        inference_result = self._run_batch_inference(batch, skeleton_packet.frame)
+
+                        if inference_result:
+                            try:
+                                self.inference_queue.put_nowait(inference_result)
+                            except queue.Full:
+                                try:
+                                    self.inference_queue.get_nowait()
+                                    self.inference_queue.put_nowait(inference_result)
+                                except queue.Empty:
+                                    pass
+
+                        last_inference_time = current_time
+                        fps_counter += 1  # 只计算一次推理
+                else:
+                    # 使用传统的滑动窗口推理
+                    preprocessed_data = self.preprocessor.add_frame(skeleton_packet.skeleton)
+                    if preprocessed_data is not None and (current_time - last_inference_time) >= self.frame_interval:
+                        inference_result = self._run_inference_async(
+                            preprocessed_data, skeleton_packet.frame,
+                            skeleton_packet.frame_id, skeleton_packet.timestamp
+                        )
+                        if inference_result:
+                            try:
+                                self.inference_queue.put_nowait(inference_result)
+                            except queue.Full:
+                                try:
+                                    self.inference_queue.get_nowait()
+                                    self.inference_queue.put_nowait(inference_result)
+                                except queue.Empty:
+                                    pass
+                        last_inference_time = current_time
+                        fps_counter += 1
+
                 if current_time - last_fps_time >= 1.0:
                     with self.stats_lock: # FIX: 使用锁保护共享字典
                         self.performance_stats['inference_fps'] = fps_counter / (current_time - last_fps_time)
                     fps_counter, last_fps_time = 0, current_time
 
-            except queue.Empty: continue
-            except Exception as e: logger.error(f"推理错误: {e}", exc_info=True)
-        
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"推理错误: {e}", exc_info=True)
+
         logger.info("推理工作线程已停止")
         try:
             self.inference_queue.put_nowait(None)
@@ -641,6 +692,75 @@ class ActionRecognitionStream:
             logger.error(f"推理错误: {e}", exc_info=True)
             return None
 
+    def _run_batch_inference(self, batch, current_frame: np.ndarray) -> Optional[InferenceResult]:
+        """
+        执行批量推理，返回最佳结果
+
+        Args:
+            batch: 推理批次
+            current_frame: 当前帧（用于结果显示）
+
+        Returns:
+            最佳推理结果（单个）
+        """
+        try:
+            # 预处理批次数据
+            preprocessed_batch = self.batch_processor.process_batch(batch)
+            if not preprocessed_batch:
+                return None
+
+            # 执行批量推理
+            inference_results = self.batch_processor.batch_inference(self.skateformer_model, preprocessed_batch)
+            if not inference_results:
+                return None
+
+            # 选择最佳结果（置信度最高的）
+            best_result = None
+            best_confidence = 0.0
+
+            for result_data in inference_results:
+                output = result_data['output']
+                segment = result_data['segment']
+
+                # 应用目标动作增强
+                enhanced_actions = []
+                target_actions_enabled = self.config['stream_config'].get('target_actions', {}).get('enabled', False)
+                if self.target_actions and target_actions_enabled:
+                    _, top5_indices = torch.topk(output, 5, dim=0)
+                    for action_id, action_info in self.target_actions.items():
+                        if action_id in top5_indices:
+                            output[action_id] += math.log(action_info['boost_factor'])
+                            enhanced_actions.append({'id': action_id, 'name': action_info['name']})
+
+                # 计算概率和预测类别
+                probabilities = F.softmax(output.unsqueeze(0), dim=1)
+                confidence, predicted_class_tensor = torch.max(probabilities, 1)
+                predicted_class = predicted_class_tensor.item()
+                confidence_value = confidence.item()
+
+                # 过滤事件
+                if self._should_filter_event(predicted_class, confidence_value, segment.end_frame_id):
+                    continue
+
+                # 检查是否是当前最佳结果
+                if confidence_value > best_confidence:
+                    best_confidence = confidence_value
+                    best_result = InferenceResult(
+                        action_id=predicted_class,
+                        action_name=self.action_labels.get(predicted_class, f"Unknown ({predicted_class})"),
+                        confidence=confidence_value,
+                        enhanced=bool(enhanced_actions),
+                        frame_id=segment.end_frame_id,  # 使用片段的最后一帧ID
+                        timestamp=segment.timestamps[-1],  # 使用片段的最后一个时间戳
+                        frame=current_frame
+                    )
+
+            return best_result
+
+        except Exception as e:
+            logger.error(f"批量推理错误: {e}", exc_info=True)
+            return None
+
     def _event_processing_worker(self):
         logger.info("事件处理工作线程已启动")
         while not self.stop_event.is_set():
@@ -726,6 +846,21 @@ class ActionRecognitionStream:
         with self.event_lock:
             last_event_frame_copy = self.last_event_frame.copy()
 
+        # 添加推理调度器统计信息
+        scheduler_stats = {}
+        if self.use_inference_scheduler and self.inference_scheduler:
+            scheduler_stats = {
+                "inference_scheduler_enabled": True,
+                "scheduler_strategy": self.inference_scheduler.strategy.value,
+                "scheduler_window_size": self.inference_scheduler.window_size,
+                "scheduler_stride": self.inference_scheduler.stride,
+                "scheduler_batch_size": self.inference_scheduler.batch_size,
+                "scheduler_stats": self.inference_scheduler.get_stats(),
+                "batch_processor_stats": self.batch_processor.get_stats() if self.batch_processor else {}
+            }
+        else:
+            scheduler_stats = {"inference_scheduler_enabled": False}
+
         return {
             "status": self.status.value, "frame_count": self.frame_count,
             "last_event_frames": last_event_frame_copy, "target_actions": list(self.target_actions.keys()) if self.target_actions else [],
@@ -736,7 +871,8 @@ class ActionRecognitionStream:
             "video_recording_enabled": getattr(self, 'enable_video_recording', False),
             "video_output_dir": getattr(self, 'video_recorder', None) and self.video_recorder.output_dir,
             "llm_inference_status": getattr(self, 'llm_manager', None) and self.llm_manager.get_status(),
-            "performance_stats": stats_copy
+            "performance_stats": stats_copy,
+            **scheduler_stats
         }
 
     def get_performance_summary(self) -> str:
@@ -744,6 +880,28 @@ class ActionRecognitionStream:
         current_stats = self.get_stats()
         stats = current_stats.get('performance_stats', {})
         queue_sizes = stats.get('queue_sizes', {})
+
+        # 构建推理调度器信息
+        scheduler_info = ""
+        if current_stats.get('inference_scheduler_enabled', False):
+            scheduler_stats = current_stats.get('scheduler_stats', {})
+            batch_stats = current_stats.get('batch_processor_stats', {})
+            scheduler_info = f"""
+
+推理调度器:
+================
+策略: {current_stats.get('scheduler_strategy', 'N/A')}
+窗口大小: {current_stats.get('scheduler_window_size', 'N/A')}
+步幅: {current_stats.get('scheduler_stride', 'N/A')}
+批量大小: {current_stats.get('scheduler_batch_size', 'N/A')}
+处理的帧数: {scheduler_stats.get('total_frames', 0)}
+处理的片段: {scheduler_stats.get('processed_segments', 0)}
+处理的批次: {scheduler_stats.get('processed_batches', 0)}
+平均批次大小: {scheduler_stats.get('avg_batch_size', 0):.1f}
+缓冲区利用率: {scheduler_stats.get('buffer_utilization', 0):.1%}
+待处理片段: {scheduler_stats.get('pending_segments', 0)}
+平均处理时间: {scheduler_stats.get('avg_processing_time', 0):.3f}s
+批次处理时间: {batch_stats.get('avg_batch_processing_time', 0):.3f}s"""
 
         return f"""
 性能摘要:
@@ -767,6 +925,7 @@ LLM队列: {queue_sizes.get('llm_queue', 0)}
 总帧数: {current_stats.get('frame_count', 0)}
 设备: {current_stats.get('device', 'N/A')}
 视频录制: {'启用' if current_stats.get('video_recording_enabled', False) else '禁用'}
+推理模式: {'调度器模式' if current_stats.get('inference_scheduler_enabled', False) else '传统模式'}{scheduler_info}
         """.strip()
 
     def _performance_monitor_worker(self):
