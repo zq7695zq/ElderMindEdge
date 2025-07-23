@@ -22,7 +22,8 @@ from utils.yolo2ntu_converter import YOLOToNTUConverter
 from utils.utils import (
     import_class, load_config, get_default_config, create_metadata_file, load_action_labels
 )
-from utils.llm_utils import LLMInferenceManager
+from utils.llm_api_client import LLMAPIClient
+
 from utils.inference_scheduler import (
     InferenceScheduler, BatchInferenceProcessor, SamplingStrategy, create_inference_scheduler
 )
@@ -89,7 +90,8 @@ class ActionRecognitionStream:
                  video_output_dir: Optional[str] = None,
                  pre_event_seconds: float = 5.0,
                  post_event_seconds: float = 5.0,
-                 llm_callback: Optional[Callable] = None):
+                 llm_callback: Optional[Callable] = None
+):
         
         self.config = self._load_config(config_path)
         
@@ -202,6 +204,7 @@ class ActionRecognitionStream:
         self.video_queue = queue.Queue(maxsize=10)
         self.llm_queue = queue.Queue(maxsize=5)
 
+
         self.performance_stats = {
             'frame_capture_fps': 0.0, 'skeleton_detection_fps': 0.0,
             'inference_fps': 0.0, 'dropped_frames': 0, 'queue_sizes': {}
@@ -209,16 +212,19 @@ class ActionRecognitionStream:
 
         self.action_labels = self._load_action_labels()
 
+        # 初始化LLM API客户端
         llm_config = self.config['stream_config'].get('llm_inference', {})
-        self.llm_manager = LLMInferenceManager(llm_config, llm_callback)
-        if not self.llm_manager.initialize():
-            logger.warning("LLM推理管理器初始化失败")
+        self.llm_client = LLMAPIClient(llm_config)
+        self.llm_callback = llm_callback
+
+
 
         logger.info("动作识别流初始化成功")
         logger.info(f"模型: {self.num_people}人, {self.num_classes}类, 数据集: {self.dataset_type}")
         logger.info(f"目标动作: {len(self.target_actions)}个动作已启用增强")
         logger.info(f"视频录制: {'启用' if self.enable_video_recording else '禁用'}")
-        logger.info(f"LLM推理: {self.llm_manager.get_status()}")
+        logger.info(f"LLM推理: {self.llm_client.get_status()}")
+
     
     def _load_config(self, config_path: Optional[str] = None) -> Dict[str, Any]:
         return load_config(config_path or "configs/stream_config.yaml", get_default_config())
@@ -325,9 +331,13 @@ class ActionRecognitionStream:
                     if self.video_recorder:
                         for recording_info in self.video_recorder.update_recordings(frame, frame_id):
                             event = recording_info['event']
-                            if hasattr(self, 'llm_manager'):
-                                try: self.llm_queue.put_nowait({'type': 'llm_inference', 'event': event})
-                                except queue.Full: logger.warning("LLM队列已满，丢弃推理任务")
+                            print(f'event_url: {event.video_path}')
+                            # 添加LLM推理任务到队列
+                            if hasattr(self, 'llm_client'):
+                                try:
+                                    self.llm_queue.put_nowait({'type': 'llm_inference', 'event': event})
+                                except queue.Full:
+                                    logger.warning("LLM队列已满，丢弃推理任务")
                             if self.event_callback: self.event_callback(event)
             except queue.Empty:
                 # 即使队列为空，也检查并处理已完成的录制，以释放资源
@@ -362,8 +372,11 @@ class ActionRecognitionStream:
         # if hasattr(self, 'thread_pool'):
         #     self.thread_pool.shutdown(wait=False, cancel_futures=True)
 
-        if hasattr(self, 'llm_manager'):
-            self.llm_manager.cleanup()
+        # 清理LLM客户端
+        if hasattr(self, 'llm_client'):
+            self.llm_client.cleanup()
+
+
 
         self.status = StreamStatus.STOPPED
         logger.info("动作识别流已停止")
@@ -787,32 +800,45 @@ class ActionRecognitionStream:
                     self.suppress_inference_until_ts = time.time() + 1.0
                 else:
                     if self.event_filtering.get('duplicate_suppression', False):
-                        if hasattr(self, 'llm_manager'):
-                            try: self.llm_queue.put_nowait({'type': 'llm_inference', 'event': event})
-                            except queue.Full: logger.warning("LLM队列已满，丢弃推理任务")
+                        # 添加LLM推理任务到队列
+                        if hasattr(self, 'llm_client'):
+                            try:
+                                self.llm_queue.put_nowait({'type': 'llm_inference', 'event': event})
+                            except queue.Full:
+                                logger.warning("LLM队列已满，丢弃推理任务")
                         if self.event_callback: self.event_callback(event)
             except queue.Empty: continue
             except Exception as e: logger.error(f"事件处理错误: {e}", exc_info=True)
         logger.info("事件处理工作线程已停止")
 
     def _llm_inference_worker(self):
+        """LLM推理工作线程"""
         logger.info("LLM推理工作线程已启动")
         while not self.stop_event.is_set():
             try:
                 llm_task = self.llm_queue.get(timeout=1.0)
-                if llm_task is None: break # 收到退出信号
+                if llm_task is None:
+                    break  # 收到退出信号
 
                 if llm_task.get('type') == 'llm_inference':
                     event = llm_task.get('event')
-                    if hasattr(self, 'llm_manager') and event:
+                    if hasattr(self, 'llm_client') and event:
                         try:
-                            llm_result = self.llm_manager.run_inference(event)
+                            llm_result = self.llm_client.run_inference(event)
                             if llm_result and llm_result.success:
                                 logger.info(f"事件 {event.action_name} 的LLM推理完成: {llm_result.result}")
-                        except Exception as e: logger.error(f"LLM推理错误: {e}")
-            except queue.Empty: continue
-            except Exception as e: logger.error(f"LLM推理工作线程错误: {e}", exc_info=False)
+                                # 调用回调函数
+                                if self.llm_callback:
+                                    self.llm_callback(llm_result, event)
+                        except Exception as e:
+                            logger.error(f"LLM推理错误: {e}")
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"LLM推理工作线程错误: {e}", exc_info=False)
         logger.info("LLM推理工作线程已停止")
+
+
 
     def _should_filter_event(self, action_id: int, confidence: float, frame_id: int) -> bool:
         if not self.event_filtering.get('enabled', False): return False
@@ -870,7 +896,8 @@ class ActionRecognitionStream:
             "fps_target": getattr(self, 'fps_target', 30), "device": str(getattr(self, 'device', 'cpu')),
             "video_recording_enabled": getattr(self, 'enable_video_recording', False),
             "video_output_dir": getattr(self, 'video_recorder', None) and self.video_recorder.output_dir,
-            "llm_inference_status": getattr(self, 'llm_manager', None) and self.llm_manager.get_status(),
+            "llm_inference_status": getattr(self, 'llm_client', None) and self.llm_client.get_status(),
+
             "performance_stats": stats_copy,
             **scheduler_stats
         }
@@ -918,6 +945,7 @@ class ActionRecognitionStream:
 推理队列: {queue_sizes.get('inference_queue', 0)}
 视频队列: {queue_sizes.get('video_queue', 0)}
 LLM队列: {queue_sizes.get('llm_queue', 0)}
+
 
 系统状态:
 =============
