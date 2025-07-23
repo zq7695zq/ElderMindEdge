@@ -118,10 +118,16 @@ class LLMAPIClient:
             event.video_path = video_url
             logger.info(f"Updated event video_path from {original_video_path} to {video_url}")
 
+            customPrompt = prompt if prompt else \
+            f"""
+            边缘检测器检测到的动作：{event.action_name}，置信度：{event.confidence:.2f}
+            注意：边缘检测器结果不一定准确，注意甄别
+            """
+
             # 准备请求数据，匹配Spring Boot接口格式
             request_data = {
                 'videoUrl': video_url,  # 使用驼峰命名匹配Java接口
-                'customPrompt': prompt if prompt else f"请分析这个视频中的动作行为。检测到的动作：{event.action_name}，置信度：{event.confidence:.2f}"
+                'customPrompt': customPrompt
             }
 
             # 可以在日志中记录事件信息，但不发送给API（因为接口不需要）
