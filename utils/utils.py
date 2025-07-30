@@ -9,8 +9,42 @@ from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional
 import os
+import re
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+def load_env_variables():
+    """加载环境变量"""
+    # 尝试从.env文件加载环境变量
+    env_path = os.path.join(os.getcwd(), '.env')
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
+        logger.info(f"已加载环境变量文件: {env_path}")
+    else:
+        logger.warning(f"未找到.env文件: {env_path}")
+
+def substitute_env_variables(config_str: str) -> str:
+    """
+    替换配置字符串中的环境变量占位符
+
+    Args:
+        config_str: 包含环境变量占位符的配置字符串
+
+    Returns:
+        替换后的配置字符串
+    """
+    def replace_env_var(match):
+        var_name = match.group(1)
+        env_value = os.getenv(var_name)
+        if env_value is None:
+            logger.warning(f"环境变量 {var_name} 未设置，保持原始占位符")
+            return match.group(0)  # 返回原始占位符
+        return env_value
+
+    # 匹配 ${VAR_NAME} 格式的环境变量占位符
+    pattern = r'\$\{([^}]+)\}'
+    return re.sub(pattern, replace_env_var, config_str)
 
 def import_class(import_str: str):
     """Import class dynamically from string."""
@@ -22,14 +56,24 @@ def import_class(import_str: str):
         raise ImportError(f'Class {class_str} cannot be found ({traceback.format_exception(*sys.exc_info())})')
 
 def load_config(config_path: str, default_config: Dict[str, Any]) -> Dict[str, Any]:
-    """Load configuration from file or return default configuration."""
+    """Load configuration from file with environment variable substitution or return default configuration."""
     if not config_path or not os.path.exists(config_path):
         logger.warning(f"Config file not found: {config_path}, using defaults")
         return default_config
 
     try:
+        # 加载环境变量
+        load_env_variables()
+
+        # 读取配置文件内容
         with open(config_path, 'r', encoding='utf-8') as f:
-            config = yaml.load(f, Loader=yaml.FullLoader)
+            config_content = f.read()
+
+        # 替换环境变量占位符
+        config_content = substitute_env_variables(config_content)
+
+        # 解析YAML
+        config = yaml.load(config_content, Loader=yaml.FullLoader)
         logger.info(f"Configuration loaded from: {config_path}")
         return config
     except Exception as e:

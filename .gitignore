@@ -1,17 +1,30 @@
+# 环境变量文件 (包含敏感信息)
+.env
+
+# 模型文件和数据
 /pretrained.zip
 /test107voice.mp4
 /yolo11x-pose.pt
+/pretrained
+/yolo11m-pose.pt
+
+# 运行时生成的文件
 /__pycache__
 /event_clips
 /llm_results
-/configs/stream_config.yaml
-/pretrained
 /utils/__pycache__
 /model/__pycache__
 /utils/llm_utils/__pycache__
+/evaluation/__pycache__
+# 忽略所有层级的 __pycache__ 文件夹
+**/__pycache__/
+
+# 测试视频文件
 test_video_for_oss.mp4
 test108voice.mp4
 /test.mp4
-/Yolo+SkateFormer.7z
-/yolo11m-pose.pt
 /只包含行为检测片段.mp4
+
+# 压缩文件
+/Yolo+SkateFormer.7z
+/*.7z

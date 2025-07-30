@@ -143,15 +143,29 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="YOLO + SkateFormer Action Recognition Stream")
-    
+
+    # --- Mode Selection ---
+    parser.add_argument('--mode', type=str, choices=['stream', 'evaluate'], default='stream',
+                        help="Mode: 'stream' for real-time processing, 'evaluate' for dataset evaluation")
+
     # --- Input Arguments ---
-    parser.add_argument('--input-video', type=str, required=True, 
-                        help="Path to input video file, webcam index (e.g., 0), or RTSP URL")
-    
+    parser.add_argument('--input-video', type=str,
+                        help="Path to input video file, webcam index (e.g., 0), or RTSP URL (required for stream mode)")
+
+    # --- Evaluation Arguments ---
+    parser.add_argument('--dataset-path', type=str,
+                        help="Path to dataset directory (required for evaluate mode)")
+    parser.add_argument('--dataset-type', type=str, choices=['ntu-rgbd', 'aigc'],
+                        help="Dataset type (required for evaluate mode)")
+    parser.add_argument('--inference-mode', type=str, choices=['local', 'cloud', 'hybrid'], default='hybrid',
+                        help="Inference mode for evaluation (default: hybrid)")
+    parser.add_argument('--output-dir', type=str, default='evaluation_results',
+                        help="Output directory for evaluation results")
+
     # --- Configuration Arguments ---
     parser.add_argument('--config', type=str, default='configs/stream_config.yaml',
                         help="Path to configuration file")
-    
+
     # --- Model Arguments (optional overrides) ---
     parser.add_argument('--yolo-model', type=str, default='yolo11x-pose.pt',
                         help="Path to YOLO pose estimation model")
@@ -159,18 +173,31 @@ if __name__ == "__main__":
                         help="Path to SkateFormer model config file")
     parser.add_argument('--skateformer-weights', type=str, default='pretrained/ntu_yolo_pose/ntu-yolo-pose.pt',
                         help="Path to SkateFormer model weights")
-    
+
     # --- Action Enhancement Arguments (optional overrides) ---
-    parser.add_argument('--target-actions', type=int, nargs='+', 
+    parser.add_argument('--target-actions', type=int, nargs='+',
                         help="List of target action indices to enhance (overrides config)")
     parser.add_argument('--boost-factor', type=float, default=3.0,
                         help="Factor to boost target action probabilities (overrides config)")
     parser.add_argument('--fps-target', type=int, default=30,
                         help="Target FPS for processing (overrides config)")
-    
+
     # --- Display Arguments ---
     parser.add_argument('--show-enhanced-only', action='store_true',
                         help="Only show enhanced target actions")
-    
+
     args = parser.parse_args()
-    main(args)
+
+    # Validate arguments based on mode
+    if args.mode == 'stream':
+        if not args.input_video:
+            parser.error("--input-video is required for stream mode")
+        main(args)
+    elif args.mode == 'evaluate':
+        if not args.dataset_path or not args.dataset_type:
+            parser.error("--dataset-path and --dataset-type are required for evaluate mode")
+        # Import and run evaluation
+        from evaluation.evaluation_runner import run_evaluation
+        run_evaluation(args)
+    else:
+        parser.error(f"Unknown mode: {args.mode}")
