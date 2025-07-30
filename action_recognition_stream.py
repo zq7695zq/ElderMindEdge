@@ -19,6 +19,7 @@ import math
 from utils.preprocessor import SkateFormerPreprocessor
 from utils.video_recorder import FrameBasedVideoRecorder, FrameData
 from utils.yolo2ntu_converter import YOLOToNTUConverter
+from ultralytics import YOLO
 from utils.utils import (
     import_class, load_config, get_default_config, create_metadata_file, load_action_labels
 )
@@ -127,19 +128,38 @@ class ActionRecognitionStream:
         use_gpu = self.config['stream_config'].get('performance', {}).get('use_gpu', True)
         self.device = torch.device("cuda:0" if torch.cuda.is_available() and use_gpu else "cpu")
         logger.info(f"使用设备: {self.device}")
-        
-        self.yolo_converter = YOLOToNTUConverter(self.config['stream_config']['yolo_model_path'])
+
+        # 加载 SkateFormer 模型以确定关键点数量
         self.skateformer_model, self.model_config = self._load_skateformer_model(
-            self.config['stream_config']['skateformer_config_path'], 
+            self.config['stream_config']['skateformer_config_path'],
             self.config['stream_config']['skateformer_weights_path'])
-        
+
+        # 根据模型配置决定使用哪种关键点提取器
         model_args = self.model_config.get('model_args', {})
+        self.num_points = model_args.get('num_points', 17)
+
+        if self.num_points == 17:
+            # 使用 YOLO pose 格式（17个关键点）
+            self.yolo_model = YOLO(self.config['stream_config']['yolo_model_path'])
+            self.yolo_model.to(self.device)
+            self.use_yolo_pose_format = True
+            logger.info("使用 YOLO pose 格式（17个关键点）")
+        else:
+            # 使用 NTU 格式（25个关键点）
+            self.yolo_converter = YOLOToNTUConverter(self.config['stream_config']['yolo_model_path'])
+            self.use_yolo_pose_format = False
+            logger.info("使用 NTU 格式（25个关键点）")
+
         self.num_people = model_args.get('num_people', 2)
         self.num_classes = model_args.get('num_classes', 60)
         self.dataset_type = "ntu120" if self.num_classes == 120 else "ntu60"
         
         window_size = self.config['stream_config'].get('window_size', 64)
-        self.preprocessor = SkateFormerPreprocessor(window_size=window_size, num_people=self.num_people)
+        self.preprocessor = SkateFormerPreprocessor(
+            window_size=window_size,
+            num_people=self.num_people,
+            num_points=self.num_points
+        )
 
         # 初始化推理调度器
         scheduler_config = self.config['stream_config'].get('inference_scheduler', {})
@@ -231,6 +251,20 @@ class ActionRecognitionStream:
 
     def _get_default_config(self) -> Dict[str, Any]:
         return get_default_config()
+
+    def _extract_yolo_pose_keypoints(self, image: np.ndarray) -> Optional[np.ndarray]:
+        """提取 YOLO pose 关键点（17个关键点）"""
+        try:
+            results = self.yolo_model(image, verbose=False)
+            for result in results:
+                if result.keypoints is not None and len(result.keypoints.data) > 0:
+                    # 获取第一个人的关键点数据
+                    yolo_kpts = result.keypoints.data[0].cpu().numpy()  # shape: (17, 3)
+                    return yolo_kpts
+            return None
+        except Exception as e:
+            logger.error(f"YOLO pose 关键点提取错误: {e}")
+            return None
 
     def _load_action_labels(self) -> Dict[int, str]:
         return load_action_labels(self.dataset_type)
@@ -508,9 +542,18 @@ class ActionRecognitionStream:
                         skip_frame_count = 0 
 
                 if process_this_frame:
-                    skeleton_data = self.yolo_converter.extract_and_convert(frame)
-                    valid_points = np.sum(skeleton_data[:, 2] > 0.3) if skeleton_data is not None and skeleton_data.shape[0] == 25 else 0
-                    if valid_points >= self.config['stream_config'].get('min_keypoints', 20):
+                    if self.use_yolo_pose_format:
+                        skeleton_data = self._extract_yolo_pose_keypoints(frame)
+                        expected_points = 17
+                        min_keypoints_default = 10
+                    else:
+                        skeleton_data = self.yolo_converter.extract_and_convert(frame)
+                        expected_points = 25
+                        min_keypoints_default = 20
+
+                    valid_points = np.sum(skeleton_data[:, 2] > 0.3) if skeleton_data is not None and skeleton_data.shape[0] == expected_points else 0
+                    min_keypoints = self.config['stream_config'].get('min_keypoints', min_keypoints_default)
+                    if valid_points >= min_keypoints:
                         skeleton_packet = SkeletonPacket(
                             skeleton=skeleton_data, frame=frame, frame_id=frame_id,
                             timestamp=timestamp, valid_points=valid_points

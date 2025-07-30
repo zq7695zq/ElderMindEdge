@@ -62,8 +62,8 @@ def main(args):
         stream = ActionRecognitionStream(
             config_path=args.config,
             yolo_model_path=args.yolo_model if args.yolo_model != 'yolo11x-pose.pt' else None,
-            skateformer_config_path=args.skateformer_config if args.skateformer_config != 'configs/SkateFormer_j.yaml' else None,
-            skateformer_weights_path=args.skateformer_weights if args.skateformer_weights != 'pretrained/ntu60_CView/SkateFormer_j.pt' else None,
+            skateformer_config_path=args.skateformer_config if args.skateformer_config != 'configs/ntu_yolo_pose/SkateFormer_j.yaml' else None,
+            skateformer_weights_path=args.skateformer_weights if args.skateformer_weights != 'pretrained/ntu_yolo_pose/ntu-yolo-pose.pt' else None,
             target_actions=target_actions_override,
             boost_factor=args.boost_factor if args.boost_factor != 3.0 else None,
             fps_target=args.fps_target if args.fps_target != 30 else None,
@@ -155,9 +155,9 @@ if __name__ == "__main__":
     # --- Model Arguments (optional overrides) ---
     parser.add_argument('--yolo-model', type=str, default='yolo11x-pose.pt',
                         help="Path to YOLO pose estimation model")
-    parser.add_argument('--skateformer-config', type=str, default='configs/SkateFormer_j.yaml',
+    parser.add_argument('--skateformer-config', type=str, default='configs/ntu_yolo_pose/SkateFormer_j.yaml',
                         help="Path to SkateFormer model config file")
-    parser.add_argument('--skateformer-weights', type=str, default='pretrained/ntu60_CView/SkateFormer_j.pt',
+    parser.add_argument('--skateformer-weights', type=str, default='pretrained/ntu_yolo_pose/ntu-yolo-pose.pt',
                         help="Path to SkateFormer model weights")
     
     # --- Action Enhancement Arguments (optional overrides) ---

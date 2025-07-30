@@ -401,7 +401,8 @@ class BatchInferenceProcessor:
                     logger.warning(f"片段 {segment.segment_id} 预处理失败")
 
             except Exception as e:
-                logger.error(f"处理片段 {segment.segment_id} 时出错: {e}")
+                import traceback
+                logger.error(f"处理片段 {segment.segment_id} 时出错: {e}\n{traceback.format_exc()}")
                 continue
 
         # 更新统计信息
@@ -423,7 +424,8 @@ class BatchInferenceProcessor:
         from utils.preprocessor import SkateFormerPreprocessor
         return SkateFormerPreprocessor(
             window_size=self.preprocessor.window_size,
-            num_people=self.preprocessor.num_people
+            num_people=self.preprocessor.num_people,
+            num_points=self.preprocessor.num_points
         )
 
     def batch_inference(self, model, preprocessed_batch: List[Tuple[torch.Tensor, torch.Tensor, WindowSegment]]) -> List[Dict[str, Any]]:

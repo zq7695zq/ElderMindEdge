@@ -11,17 +11,18 @@ import time
 class SkateFormerPreprocessor:
     """Optimized SkateFormer data preprocessing with memory efficiency"""
 
-    def __init__(self, window_size: int = 64, num_people: int = 2, buffer_size: int = None):
+    def __init__(self, window_size: int = 64, num_people: int = 2, buffer_size: int = None, num_points: int = 25):
         self.window_size = window_size
         self.num_people = num_people
+        self.num_points = num_points
 
         # 使用固定大小的双端队列作为循环缓冲区
         buffer_size = buffer_size or (window_size * 2)
         self.data_buffer: Deque[np.ndarray] = deque(maxlen=buffer_size)
 
         # 预分配内存
-        self.data_numpy = np.zeros((3, window_size, 25, num_people), dtype=np.float32)
-        self.temp_frames = np.zeros((window_size, 25, 3), dtype=np.float32)
+        self.data_numpy = np.zeros((3, window_size, num_points, num_people), dtype=np.float32)
+        self.temp_frames = np.zeros((window_size, num_points, 3), dtype=np.float32)
         self.indices = np.arange(window_size, dtype=np.float32)  # 直接使用float32类型
 
         # 缓存张量以减少内存分配
@@ -37,7 +38,7 @@ class SkateFormerPreprocessor:
 
         # 处理空数据
         if skeleton_data is None:
-            skeleton_data = np.zeros((25, 3), dtype=np.float32)
+            skeleton_data = np.zeros((self.num_points, 3), dtype=np.float32)
 
         # 确保数据类型和形状正确
         if skeleton_data.dtype != np.float32:
@@ -72,7 +73,7 @@ class SkateFormerPreprocessor:
         # 批量复制数据，减少循环开销
         for t, frame_data in enumerate(frames):
             if frame_data is not None and frame_data.size > 0:
-                rows = min(25, frame_data.shape[0])
+                rows = min(self.num_points, frame_data.shape[0])
                 cols = min(3, frame_data.shape[1])
                 self.temp_frames[t, :rows, :cols] = frame_data[:rows, :cols]
 
@@ -107,7 +108,12 @@ class SkateFormerPreprocessor:
                     channel_data[non_zero_mask] = channel_data[non_zero_mask] * 2 - 1
 
     def _apply_partition(self) -> np.ndarray:
-        return apply_partition(self.data_numpy)
+        # 只对 NTU 格式（25个关键点）应用分区
+        if self.num_points == 25:
+            return apply_partition(self.data_numpy)
+        else:
+            # 对于 YOLO pose 格式（17个关键点），直接返回原始数据
+            return self.data_numpy
 
     def get_performance_stats(self) -> dict:
         """获取性能统计信息"""
