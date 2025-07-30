@@ -1,0 +1,197 @@
+stream_config:
+  # Video processing settings
+  fps_target: 24
+  frame_buffer_size: 256
+  
+  # Model paths
+  yolo_model_path: "yolo11x-pose.pt"
+  skateformer_config_path: "configs/ntu_yolo_pose/SkateFormer_j.yaml"
+  skateformer_weights_path: "pretrained/ntu_yolo_pose/ntu-yolo-pose.pt"
+  
+  # Preprocessing settings
+  window_size: 64
+  confidence_threshold: 0.2
+  min_keypoints: 10  # 调整为适合17个关键点的阈值
+
+  # Adaptive performance adjustment settings
+  max_skip_frames: 3  # Maximum frames to skip during processing (adaptive range: 1-10)
+  scene_change_threshold: 30.0  # Scene change detection threshold (adaptive range: 30.0-50.0)
+  
+  # Action enhancement settings
+  target_actions:
+    enabled: true
+    boost_factor: 3.0  # Base boost factor
+    actions:
+      - id: 42
+        name: "falling"
+        priority: critical
+        description: "Person falling down - safety concern"
+      - id: 8
+        name: "standing up"
+        priority: critical
+        description: "Person standing up"
+      - id: 0
+        name: "drink water"
+        priority: critical
+        description: "Person drinking water"
+      - id: 7
+        name: "sitting down"
+        priority: critical
+        description: "Person sitting down"
+      - id: 1
+        name: "eat meal/snack"
+        priority: normal
+        description: "Person eating a meal or snack"
+      - id: 2
+        name: "brushing teeth"
+        priority: normal
+        description: "Person brushing their teeth"
+      - id: 28
+        name: "playing with phone/tablet"
+        priority: normal
+        description: "Person using a phone or tablet"
+      - id: 29
+        name: "typing on a keyboard"
+        priority: normal
+        description: "Person typing on a keyboard"
+      - id: 32
+        name: "check time"
+        priority: normal
+        description: "Person checking the time"
+      - id: 10
+        name: "reading"
+        priority: normal
+        description: "Person reading a book or paper"
+  
+  # Priority boost factors
+  priority_boost_factors:
+    critical: 5.0
+    high: 3.0
+    medium: 2.0
+    low: 1.0
+  
+  # Event filtering settings
+  event_filtering:
+    enabled: true
+    min_confidence: 0.15
+    duplicate_suppression: true
+    duplicate_frame_window: 300 # Number of frames to check for duplicates
+    max_events_per_second: 10  # Rate limiting
+  
+  # Video recording settings for event clips
+  video_recording:
+    enabled: true
+    output_dir: "event_clips"
+    pre_event_seconds: 5.0  # Record 5 seconds before event
+    post_event_seconds: 5.0  # Record 5 seconds after event
+    max_buffer_size: 300  # Maximum frames in buffer (10 seconds at 30 FPS)
+    auto_cleanup_days: 30  # Auto-delete clips older than 30 days
+    
+    # Video quality settings
+    codec: "mp4v"  # Video codec
+    quality: "high"  # low, medium, high
+    
+    # Recording filters
+    record_all_events: false  # If true, record all events; if false, only record target actions
+    min_confidence_for_recording: 0.3  # Minimum confidence to trigger recording
+    record_enhanced_only: false  # Only record enhanced (target) actions
+  
+  # 推理调度器设置 - 优化视频流推理策略
+  inference_scheduler:
+    enabled: true  # 是否启用推理调度器
+
+    # 采样策略配置
+    strategy: "stride_based"  # 采样策略: "sliding_window", "stride_based", "adaptive", "custom"
+    window_size: 64  # 窗口大小
+    stride: 8  # 步幅大小 (建议 stride <= window_size)
+
+    # 批量推理配置
+    batch_size: 3  # 批量大小，一次处理多少个窗口片段
+    max_buffer_size: 200  # 最大缓冲区大小
+
+    # 自适应采样配置 (仅当 strategy="adaptive" 时生效)
+    adaptive_config:
+      min_stride: 1  # 最小步幅
+      max_stride: 16  # 最大步幅
+      load_threshold_high: 0.8  # 高负载阈值
+      load_threshold_low: 0.3   # 低负载阈值
+      adjustment_factor: 1.2    # 调整因子
+
+    # 性能优化选项
+    enable_batch_inference: true  # 是否启用批量推理
+    inference_timeout: 5.0  # 推理超时时间(秒)
+
+  # Performance settings
+  performance:
+    use_gpu: true
+    gpu_memory_fraction: 0.8
+    batch_size: 1
+    num_workers: 2
+
+    # Adaptive performance adjustment settings
+    adaptive_adjustment:
+      enabled: true  # Enable adaptive performance adjustment
+
+      # Queue monitoring thresholds
+      queue_thresholds:
+        high_load_ratio: 0.8  # Queue ratio threshold for high load (triggers frame skipping increase)
+        low_load_ratio: 0.3   # Queue ratio threshold for low load (triggers frame skipping decrease)
+
+      # Frame skipping adjustment
+      frame_skipping:
+        min_skip_frames: 1    # Minimum frames to skip
+        max_skip_frames: 10   # Maximum frames to skip
+        adjustment_step: 1    # Step size for skip frame adjustment
+
+      # Scene change threshold adjustment
+      scene_change:
+        min_threshold: 30.0   # Minimum scene change threshold
+        max_threshold: 50.0   # Maximum scene change threshold
+        adjustment_step: 5.0  # Step size for threshold adjustment
+        low_fps_trigger: 10   # FPS threshold to trigger scene change adjustment
+
+      # Performance monitoring
+      monitoring:
+        avg_processing_time_warning: 0.1  # Warning threshold for preprocessing time (seconds)
+  
+  # RTSP/Camera settings
+  rtsp:
+    buffer_size: 1
+    timeout: 5000
+    reconnect_attempts: 3
+    reconnect_delay: 5
+    
+  # Logging settings
+  logging:
+    level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+    save_events_log: true
+    events_log_file: "events.log"
+    max_log_size_mb: 100
+    backup_count: 5
+    
+  # LLM推理设置
+  llm_inference:
+    enabled: true  # 是否启用LLM推理
+    api_url: "${LLM_API_URL}"  # LLM推理API接口地址 (从环境变量读取)
+    timeout: "${LLM_API_TIMEOUT}"  # 请求超时时间(秒) (从环境变量读取)
+    max_retries: "${LLM_MAX_RETRIES}"  # 最大重试次数 (从环境变量读取)
+    retry_delay: "${LLM_RETRY_DELAY}"  # 重试延迟时间(秒) (从环境变量读取)
+
+    # 推理触发条件
+    trigger_conditions:
+      all_events: false  # 是否对所有事件进行推理
+      target_actions_only: false  # 仅对目标动作进行推理
+      min_confidence: 0.0  # 最小置信度阈值 - 低于此值不推理
+      max_confidence: 0.8  # 最大置信度阈值 - 高于此值DNN已足够确定，不需要LLM推理
+      critical_actions_only: false  # 仅对关键动作进行推理
+
+    # 视频上传配置 (上传到OSS供API使用)
+    video_upload:
+      enabled: true  # 是否启用视频上传
+      cloud_provider: "oss"  # 云存储提供商: "oss"
+      # OSS配置 (从环境变量读取敏感信息)
+      oss_config:
+        access_key_id: "${OSS_ACCESS_KEY_ID}"
+        access_key_secret: "${OSS_ACCESS_KEY_SECRET}"
+        endpoint: "${OSS_ENDPOINT}"
+        bucket_name: "${OSS_BUCKET_NAME}"
